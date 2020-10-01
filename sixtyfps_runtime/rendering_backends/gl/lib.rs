@@ -9,7 +9,9 @@
 LICENSE END */
 use cgmath::Matrix4;
 use glow::{Context as GLContext, HasContext};
-use lyon::tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};
+use lyon::tessellation::geometry_builder::{
+    BasicGeometryBuilder, BuffersBuilder, GeometryBuilder, VertexBuffers,
+};
 use lyon::tessellation::{
     FillAttributes, FillOptions, FillTessellator, StrokeAttributes, StrokeOptions,
     StrokeTessellator,
@@ -33,9 +35,7 @@ mod texture;
 use texture::{GLTexture, TextureAtlas};
 
 mod shader;
-use shader::{ImageShader, PathShader};
-
-use shader::GlyphShader;
+use shader::{GlyphShader, ImageShader, PathShader, RectShader};
 
 mod buffers;
 use buffers::{GLArrayBuffer, GLIndexBuffer};
@@ -68,6 +68,13 @@ enum GLRenderingPrimitive {
         vertices: GLArrayBuffer<Vertex>,
         indices: GLIndexBuffer<u16>,
     },
+    Rectangle {
+        vertices: GLArrayBuffer<Vertex>,
+        indices: GLIndexBuffer<u16>,
+        radius: f32, // FIXME: make rendering variable
+        border_width: f32,
+        rect_size: Size,
+    },
     Texture {
         vertices: GLArrayBuffer<Vertex>,
         texture_vertices: GLArrayBuffer<Vertex>,
@@ -84,25 +91,20 @@ enum GLRenderingPrimitive {
     ApplyClip {
         vertices: Rc<GLArrayBuffer<Vertex>>,
         indices: Rc<GLIndexBuffer<u16>>,
+        radius: f32,
+        rect_size: Size,
     },
     ReleaseClip {
         vertices: Rc<GLArrayBuffer<Vertex>>,
         indices: Rc<GLIndexBuffer<u16>>,
+        radius: f32,
+        rect_size: Size,
     },
 }
 
-struct TextCursor {
+struct NormalRectangle {
     vertices: GLArrayBuffer<Vertex>,
     indices: GLIndexBuffer<u16>,
-}
-
-impl TextCursor {
-    fn from_primitive(rect_primitive: GLRenderingPrimitive) -> Self {
-        match rect_primitive {
-            GLRenderingPrimitive::FillPath { vertices, indices } => Self { vertices, indices },
-            _ => panic!("internal error: TextCursor can only be constructed from rectangle fill"),
-        }
-    }
 }
 
 pub struct GLRenderer {
@@ -110,6 +112,7 @@ pub struct GLRenderer {
     path_shader: PathShader,
     image_shader: ImageShader,
     glyph_shader: GlyphShader,
+    rect_shader: RectShader,
     #[cfg(not(target_arch = "wasm32"))]
     platform_data: Rc<PlatformData>,
     texture_atlas: Rc<RefCell<TextureAtlas>>,
@@ -120,7 +123,7 @@ pub struct GLRenderer {
         Rc<winit::event_loop::EventLoopProxy<sixtyfps_corelib::eventloop::CustomEvent>>,
     #[cfg(not(target_arch = "wasm32"))]
     windowed_context: Option<glutin::WindowedContext<glutin::NotCurrent>>,
-    text_cursor_rect: Option<TextCursor>,
+    normal_rect: Option<NormalRectangle>,
 }
 
 pub struct GLRenderingPrimitivesBuilder {
@@ -138,8 +141,6 @@ pub struct GLRenderingPrimitivesBuilder {
         Rc<winit::event_loop::EventLoopProxy<sixtyfps_corelib::eventloop::CustomEvent>>,
     #[cfg(not(target_arch = "wasm32"))]
     windowed_context: glutin::WindowedContext<glutin::PossiblyCurrent>,
-
-    text_cursor_rect: Option<TextCursor>,
 }
 
 pub struct GLFrame {
@@ -147,10 +148,11 @@ pub struct GLFrame {
     path_shader: PathShader,
     image_shader: ImageShader,
     glyph_shader: GlyphShader,
+    rect_shader: RectShader,
     root_matrix: cgmath::Matrix4<f32>,
     #[cfg(not(target_arch = "wasm32"))]
     windowed_context: glutin::WindowedContext<glutin::PossiblyCurrent>,
-    text_cursor_rect: Option<TextCursor>,
+    normal_rect: Option<NormalRectangle>,
     current_stencil_clip_value: u8,
 }
 
@@ -255,6 +257,7 @@ impl GLRenderer {
         let path_shader = PathShader::new(&context);
         let image_shader = ImageShader::new(&context);
         let glyph_shader = GlyphShader::new(&context);
+        let rect_shader = RectShader::new(&context);
         #[cfg(not(target_arch = "wasm32"))]
         let platform_data = Rc::new(PlatformData::default());
 
@@ -263,6 +266,7 @@ impl GLRenderer {
             path_shader,
             image_shader,
             glyph_shader,
+            rect_shader,
             #[cfg(not(target_arch = "wasm32"))]
             platform_data,
             texture_atlas: Rc::new(RefCell::new(TextureAtlas::new())),
@@ -272,7 +276,7 @@ impl GLRenderer {
             event_loop_proxy: Rc::new(event_loop.create_proxy()),
             #[cfg(not(target_arch = "wasm32"))]
             windowed_context: Some(unsafe { windowed_context.make_not_current().unwrap() }),
-            text_cursor_rect: None,
+            normal_rect: None,
         }
     }
 }
@@ -292,6 +296,37 @@ impl GraphicsBackend for GLRenderer {
         #[cfg(not(target_arch = "wasm32"))]
         let current_windowed_context =
             unsafe { self.windowed_context.take().unwrap().make_current().unwrap() };
+
+        {
+            if self.normal_rect.is_none() {
+                let rect = Rect::new(Point::default(), Size::new(1., 1.));
+
+                let mut geometry: VertexBuffers<Vertex, u16> = VertexBuffers::new();
+
+                let mut geometry_builder =
+                    BuffersBuilder::new(&mut geometry, |pos: lyon::math::Point| Vertex {
+                        _pos: [pos.x as f32, pos.y as f32],
+                    });
+
+                geometry_builder.begin_geometry();
+
+                let a = geometry_builder.add_vertex(rect.origin).unwrap();
+                let b =
+                    geometry_builder.add_vertex(Point::new(rect.min_x(), rect.max_y())).unwrap();
+                let c = geometry_builder.add_vertex(rect.max()).unwrap();
+                let d =
+                    geometry_builder.add_vertex(Point::new(rect.max_x(), rect.min_y())).unwrap();
+                geometry_builder.add_triangle(a, b, c);
+                geometry_builder.add_triangle(a, c, d);
+
+                geometry_builder.end_geometry();
+                let vertices = GLArrayBuffer::new(&self.context, &geometry.vertices);
+                let indices = GLIndexBuffer::new(&self.context, &geometry.indices);
+
+                self.normal_rect = Some(NormalRectangle { vertices, indices })
+            }
+        }
+
         GLRenderingPrimitivesBuilder {
             context: self.context.clone(),
             fill_tesselator: FillTessellator::new(),
@@ -306,17 +341,15 @@ impl GraphicsBackend for GLRenderer {
             event_loop_proxy: self.event_loop_proxy.clone(),
             #[cfg(not(target_arch = "wasm32"))]
             windowed_context: current_windowed_context,
-            text_cursor_rect: self.text_cursor_rect.take(),
         }
     }
 
-    fn finish_primitives(&mut self, mut builder: Self::RenderingPrimitivesBuilder) {
+    fn finish_primitives(&mut self, builder: Self::RenderingPrimitivesBuilder) {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.windowed_context =
                 Some(unsafe { builder.windowed_context.make_not_current().unwrap() });
         }
-        self.text_cursor_rect = builder.text_cursor_rect.take();
     }
 
     fn new_frame(&mut self, width: u32, height: u32, clear_color: &Color) -> GLFrame {
@@ -351,10 +384,11 @@ impl GraphicsBackend for GLRenderer {
             path_shader: self.path_shader.clone(),
             image_shader: self.image_shader.clone(),
             glyph_shader: self.glyph_shader.clone(),
+            rect_shader: self.rect_shader.clone(),
             root_matrix: cgmath::ortho(0.0, width as f32, height as f32, 0.0, -1., 1.0),
             #[cfg(not(target_arch = "wasm32"))]
             windowed_context: current_windowed_context,
-            text_cursor_rect: self.text_cursor_rect.take(),
+            normal_rect: self.normal_rect.take(),
             current_stencil_clip_value: 0,
         }
     }
@@ -367,7 +401,7 @@ impl GraphicsBackend for GLRenderer {
             self.windowed_context =
                 Some(unsafe { frame.windowed_context.make_not_current().unwrap() });
         }
-        self.text_cursor_rect = frame.text_cursor_rect.take();
+        self.normal_rect = frame.normal_rect.take();
     }
     fn window(&self) -> &winit::window::Window {
         #[cfg(not(target_arch = "wasm32"))]
@@ -391,7 +425,7 @@ impl RenderingPrimitivesBuilder for GLRenderingPrimitivesBuilder {
                     use lyon::math::Point;
 
                     let rect = Rect::new(Point::default(), Size::new(*width, *height));
-                    self.fill_rectangle(&rect, 0.).into_iter().collect()
+                    self.fill_rectangle(&rect, 0., 0.).into_iter().collect()
                 }
                 HighLevelRenderingPrimitive::BorderRectangle {
                     width,
@@ -401,22 +435,8 @@ impl RenderingPrimitivesBuilder for GLRenderingPrimitivesBuilder {
                 } => {
                     use lyon::math::Point;
 
-                    let border_offset = *border_width / 2.;
-
-                    let rect = Rect::new(
-                        Point::new(border_offset, border_offset),
-                        Size::new(*width - border_width, *height - *border_width),
-                    );
-
-                    let mut primitives: SmallVec<_> =
-                        self.fill_rectangle(&rect, *border_radius).into_iter().collect();
-
-                    if *border_width > 0. {
-                        let stroke = self.stroke_rectangle(&rect, *border_width, *border_radius);
-                        primitives.extend(stroke);
-                    }
-
-                    primitives
+                    let rect = Rect::new(Point::default(), Size::new(*width, *height));
+                    self.fill_rectangle(&rect, *border_radius, *border_width).into_iter().collect()
                 }
                 HighLevelRenderingPrimitive::Image { source } => {
                     match source {
@@ -510,13 +530,6 @@ impl RenderingPrimitivesBuilder for GLRenderingPrimitivesBuilder {
                     }
                 }
                 HighLevelRenderingPrimitive::Text { text, font_family, font_size } => {
-                    if self.text_cursor_rect.is_none() {
-                        let rect = Rect::new(Point::default(), Size::new(1., 1.));
-                        self.text_cursor_rect = Some(TextCursor::from_primitive(
-                            self.fill_rectangle(&rect, 0.).unwrap(),
-                        ));
-                    }
-
                     smallvec![self.create_glyph_runs(text, font_family, *font_size)]
                 }
                 HighLevelRenderingPrimitive::Path { width, height, elements, stroke_width } => {
@@ -535,9 +548,9 @@ impl RenderingPrimitivesBuilder for GLRenderingPrimitivesBuilder {
                     use lyon::math::Point;
 
                     let rect = Rect::new(Point::default(), Size::new(*width, *height));
-                    self.fill_rectangle(&rect, 0.).map(|primitive| match primitive {
-                        GLRenderingPrimitive::FillPath { vertices, indices } => {
-                            GLRenderingPrimitive::ApplyClip{vertices: Rc::new(vertices), indices: Rc::new(indices)}
+                    self.fill_rectangle(&rect, 0., 0.).map(|primitive| match primitive {
+                        GLRenderingPrimitive::Rectangle { vertices, indices, radius, border_width, rect_size } => {
+                            GLRenderingPrimitive::ApplyClip{vertices: Rc::new(vertices), indices: Rc::new(indices), radius, rect_size}
                         }
                         _ => panic!("internal error: unsupported clipping primitive returned by fill_rectangle")
                     }).into_iter().collect()
@@ -610,76 +623,46 @@ impl GLRenderingPrimitivesBuilder {
         self.fill_path_from_geometry(&geometry)
     }
 
-    fn fill_rectangle(&mut self, rect: &Rect, radius: f32) -> Option<GLRenderingPrimitive> {
+    fn fill_rectangle(
+        &mut self,
+        rect: &Rect,
+        radius: f32,
+        border_width: f32,
+    ) -> Option<GLRenderingPrimitive> {
         let mut geometry: VertexBuffers<Vertex, u16> = VertexBuffers::new();
 
         let mut geometry_builder = BuffersBuilder::new(&mut geometry, |pos: lyon::math::Point| {
             Vertex { _pos: [pos.x as f32, pos.y as f32] }
         });
 
-        if radius > 0. {
-            lyon::tessellation::basic_shapes::fill_rounded_rectangle(
-                rect,
-                &lyon::tessellation::basic_shapes::BorderRadii {
-                    top_left: radius,
-                    top_right: radius,
-                    bottom_left: radius,
-                    bottom_right: radius,
-                },
-                &lyon::tessellation::FillOptions::DEFAULT,
-                &mut geometry_builder,
-            )
-            .unwrap();
+        geometry_builder.begin_geometry();
+
+        let a = geometry_builder.add_vertex(rect.origin).unwrap();
+        let b = geometry_builder.add_vertex(Point::new(rect.min_x(), rect.max_y())).unwrap();
+        let c = geometry_builder.add_vertex(rect.max()).unwrap();
+        let d = geometry_builder.add_vertex(Point::new(rect.max_x(), rect.min_y())).unwrap();
+        geometry_builder.add_triangle(a, b, c);
+        geometry_builder.add_triangle(a, c, d);
+
+        geometry_builder.end_geometry();
+
+        if geometry.vertices.len() == 0 || geometry.indices.len() == 0 {
+            None
         } else {
-            lyon::tessellation::basic_shapes::fill_rectangle(
-                rect,
-                &lyon::tessellation::FillOptions::DEFAULT,
-                &mut geometry_builder,
+            let vertices = GLArrayBuffer::new(&self.context, &geometry.vertices);
+            let indices = GLIndexBuffer::new(&self.context, &geometry.indices);
+
+            Some(
+                GLRenderingPrimitive::Rectangle {
+                    vertices,
+                    indices,
+                    radius,
+                    border_width,
+                    rect_size: rect.size,
+                }
+                .into(),
             )
-            .unwrap();
         }
-
-        self.fill_path_from_geometry(&geometry)
-    }
-
-    fn stroke_rectangle(
-        &mut self,
-        rect: &Rect,
-        stroke_width: f32,
-        radius: f32,
-    ) -> Option<GLRenderingPrimitive> {
-        let mut geometry: VertexBuffers<Vertex, u16> = VertexBuffers::new();
-
-        let stroke_opts = StrokeOptions::DEFAULT.with_line_width(stroke_width);
-
-        let mut geometry_builder =
-            BuffersBuilder::new(&mut geometry, |pos: lyon::math::Point, _: StrokeAttributes| {
-                Vertex { _pos: [pos.x as f32, pos.y as f32] }
-            });
-
-        if radius > 0. {
-            lyon::tessellation::basic_shapes::stroke_rounded_rectangle(
-                rect,
-                &lyon::tessellation::basic_shapes::BorderRadii {
-                    top_left: radius,
-                    top_right: radius,
-                    bottom_left: radius,
-                    bottom_right: radius,
-                },
-                &stroke_opts,
-                &mut geometry_builder,
-            )
-            .unwrap();
-        } else {
-            lyon::tessellation::basic_shapes::stroke_rectangle(
-                rect,
-                &stroke_opts,
-                &mut geometry_builder,
-            )
-            .unwrap();
-        }
-
-        self.fill_path_from_geometry(&geometry)
     }
 
     fn create_image(
@@ -836,6 +819,31 @@ impl GLFrame {
                 self.fill_path(&matrix, vertices, indices, col);
                 None
             }
+            GLRenderingPrimitive::Rectangle {
+                vertices,
+                indices,
+                radius,
+                border_width,
+                rect_size,
+            } => {
+                let col: ARGBColor<f32> = (*rendering_var.next().unwrap().as_color()).into();
+                let border_color: ARGBColor<f32> = if *border_width > 0. {
+                    (*rendering_var.next().unwrap().as_color()).into()
+                } else {
+                    Default::default()
+                };
+                self.draw_rect(
+                    &matrix,
+                    vertices,
+                    indices,
+                    col,
+                    *radius,
+                    *border_width,
+                    border_color,
+                    *rect_size,
+                );
+                None
+            }
             GLRenderingPrimitive::Texture { vertices, texture_vertices, texture, image_size } => {
                 let matrix = if let Some(scaled_width) = rendering_var.next() {
                     matrix
@@ -888,7 +896,7 @@ impl GLFrame {
                 // 4. We draw the selection background rectangle, use regular stencil testing, write into the stencil buffer with GL_DECR, use false color mask.
                 //    This "removes" the selection rectangle from the stencil buffer again.
 
-                let reset_stencil = match (rendering_var.peek(), &self.text_cursor_rect) {
+                let reset_stencil = match (rendering_var.peek(), &self.normal_rect) {
                     (
                         Some(RenderingVariable::TextSelection(x, width, height)),
                         Some(text_cursor),
@@ -952,7 +960,7 @@ impl GLFrame {
                 render_glyphs(col);
 
                 if let (Some(selection_matrix), Some(text_cursor)) =
-                    (reset_stencil, &self.text_cursor_rect)
+                    (reset_stencil, &self.normal_rect)
                 {
                     // Phase 4
                     unsafe {
@@ -974,7 +982,7 @@ impl GLFrame {
                     }
                 }
 
-                match (rendering_var.peek(), &self.text_cursor_rect) {
+                match (rendering_var.peek(), &self.normal_rect) {
                     (Some(RenderingVariable::TextCursor(x, width, height)), Some(text_cursor)) => {
                         let matrix = matrix
                             * Matrix4::from_translation(cgmath::Vector3::new(*x, 0., 0.))
@@ -988,18 +996,22 @@ impl GLFrame {
                 }
                 None
             }
-            GLRenderingPrimitive::ApplyClip { vertices, indices } => {
+            GLRenderingPrimitive::ApplyClip { vertices, indices, radius, rect_size } => {
                 unsafe {
                     self.context.stencil_mask(0xff);
                     self.context.stencil_op(glow::KEEP, glow::KEEP, glow::INCR);
                     self.context.color_mask(false, false, false, false);
                 }
 
-                self.fill_path(
+                self.draw_rect(
                     &matrix,
                     &vertices,
                     &indices,
                     ARGBColor { alpha: 0., red: 0., green: 0., blue: 0. },
+                    *radius,
+                    0.,
+                    ARGBColor { alpha: 0., red: 0., green: 0., blue: 0. },
+                    *rect_size,
                 );
 
                 unsafe {
@@ -1022,22 +1034,28 @@ impl GLFrame {
                     gl_primitives: smallvec![GLRenderingPrimitive::ReleaseClip {
                         vertices: vertices.clone(),
                         indices: indices.clone(),
+                        radius: *radius,
+                        rect_size: *rect_size,
                     }],
                 })
             }
 
-            GLRenderingPrimitive::ReleaseClip { vertices, indices } => {
+            GLRenderingPrimitive::ReleaseClip { vertices, indices, radius, rect_size } => {
                 unsafe {
                     self.context.stencil_mask(0xff);
                     self.context.stencil_op(glow::KEEP, glow::KEEP, glow::DECR);
                     self.context.color_mask(false, false, false, false);
                 }
 
-                self.fill_path(
+                self.draw_rect(
                     &matrix,
                     &vertices,
                     &indices,
                     ARGBColor { alpha: 0., red: 0., green: 0., blue: 0. },
+                    *radius,
+                    0.,
+                    ARGBColor { alpha: 0., red: 0., green: 0., blue: 0. },
+                    *rect_size,
                 );
 
                 unsafe {
@@ -1082,6 +1100,40 @@ impl GLFrame {
         }
 
         self.path_shader.unbind(&self.context);
+    }
+
+    fn draw_rect(
+        &self,
+        matrix: &Matrix4<f32>,
+        vertices: &GLArrayBuffer<Vertex>,
+        indices: &GLIndexBuffer<u16>,
+        color: ARGBColor<f32>,
+        radius: f32,
+        border_width: f32,
+        border_color: ARGBColor<f32>,
+        rect_size: Size,
+    ) {
+        // Make sure the border fits into the rectangle
+        let radius = if radius * 2. > rect_size.width { rect_size.width / 2. } else { radius };
+        let radius = if radius * 2. > rect_size.height { rect_size.height / 2. } else { radius };
+
+        self.rect_shader.bind(
+            &self.context,
+            &to_gl_matrix(&matrix),
+            color,
+            &[rect_size.width / 2., rect_size.height / 2.],
+            radius,
+            border_width,
+            border_color,
+            vertices,
+            indices,
+        );
+
+        unsafe {
+            self.context.draw_elements(glow::TRIANGLES, indices.len, glow::UNSIGNED_SHORT, 0);
+        }
+
+        self.rect_shader.unbind(&self.context);
     }
 
     fn render_texture(
