@@ -1272,6 +1272,10 @@ fn compile_expression(e: &Expression, component: &Rc<Component>) -> TokenStream 
             let value_ident = format_ident!("{}", value.to_string());
             quote!(sixtyfps::re_exports::#base_ident::#value_ident)
         }
+        Expression::ReturnStatement(expr) => {
+            let return_expr = expr.as_ref().map(|expr| compile_expression(expr, component));
+            quote!(return (#return_expr) as _;)
+        },
     }
 }
 

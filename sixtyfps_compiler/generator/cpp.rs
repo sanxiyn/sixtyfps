@@ -1412,7 +1412,16 @@ fn compile_expression(e: &crate::expression_tree::Expression, component: &Rc<Com
             }
         }
         Expression::CodeBlock(sub) => {
-            let mut x = sub.iter().map(|e| compile_expression(e, component)).collect::<Vec<_>>();
+            let len = sub.len();
+            let mut x = sub.iter().enumerate().map(|(i, e)| {
+                match e {
+                    Expression::ReturnStatement(return_expr) if i == len - 1 => {
+                        return_expr.as_ref().map_or_else(String::new, |return_expr| compile_expression(return_expr, component))
+                    },
+                    e => compile_expression(e, component)
+                }
+
+            }).collect::<Vec<_>>();
             x.last_mut().map(|s| *s = format!("return {};", s));
 
             format!("[&]{{ {} }}()", x.join(";"))
@@ -1552,6 +1561,7 @@ fn compile_expression(e: &crate::expression_tree::Expression, component: &Rc<Com
         }
         Expression::Uncompiled(_) | Expression::TwoWayBinding(..) => panic!(),
         Expression::Invalid => format!("\n#error invalid expression\n"),
+        Expression::ReturnStatement(expr) => format!("return {};", expr.as_ref().map_or_else(String::new, |expr| compile_expression(expr, component))),
     }
 }
 
