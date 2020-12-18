@@ -21,10 +21,6 @@ cfg_if::cfg_if! {
 }
 
 pub fn create_window() -> ComponentWindow {
-    #[cfg(any(
-        feature = "sixtyfps-rendering-backend-qt",
-        feature = "sixtyfps-rendering-backend-gl"
-    ))]
     let backend_config = std::env::var("SIXTYFPS_BACKEND").unwrap_or_default();
 
     #[cfg(feature = "sixtyfps-rendering-backend-qt")]
@@ -34,6 +30,9 @@ pub fn create_window() -> ComponentWindow {
     #[cfg(feature = "sixtyfps-rendering-backend-gl")]
     if backend_config == "GL" {
         return sixtyfps_rendering_backend_gl::create_gl_window();
+    }
+    if backend_config == "femtovg" {
+        return sixtyfps_rendering_backend_femtovg::create_gl_window();
     }
 
     #[cfg(any(

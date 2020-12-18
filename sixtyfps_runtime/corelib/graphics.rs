@@ -131,6 +131,20 @@ impl From<RgbaColor<f32>> for Color {
     }
 }
 
+#[cfg(feature = "femtovg_backend")]
+impl From<&Color> for femtovg::Color {
+    fn from(col: &Color) -> Self {
+        Self::rgba(col.red, col.green, col.blue, col.alpha)
+    }
+}
+
+#[cfg(feature = "femtovg_backend")]
+impl From<Color> for femtovg::Color {
+    fn from(col: Color) -> Self {
+        Self::rgba(col.red, col.green, col.blue, col.alpha)
+    }
+}
+
 impl Color {
     /// Construct a color from an integer encoded as `0xAARRGGBB`
     pub const fn from_argb_encoded(encoded: u32) -> Color {

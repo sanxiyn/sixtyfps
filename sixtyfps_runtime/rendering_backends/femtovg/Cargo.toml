@@ -1,0 +1,47 @@
+[package]
+name = "sixtyfps-rendering-backend-femtovg"
+version = "0.0.4"
+authors = ["SixtyFPS <info@sixtyfps.io>"]
+edition = "2018"
+license = "GPL-3.0-only"
+description = "FemtoVG rendering backend for SixtyFPS"
+repository = "https://github.com/sixtyfpsui/sixtyfps"
+homepage = "https://sixtyfps.io"
+
+
+[lib]
+path = "lib.rs"
+
+[features]
+x11 = ["winit/x11", "glutin/x11", "sixtyfps-corelib/x11"]
+wayland = ["winit/wayland", "glutin/wayland", "sixtyfps-corelib/wayland"]
+default = ["x11"]
+
+[dependencies]
+sixtyfps-corelib = { version = "=0.0.4", path = "../../corelib", features = ["femtovg_backend"] }
+lyon = { version = "0.16" }
+image = { version = "0.23.12", default-features = false }
+cgmath = "0.17.0"
+vtable = { version = "0.1", path = "../../../helper_crates/vtable" }
+pathfinder_geometry = "0.5.1"
+guillotiere = "0.6"
+itertools = "0.9.0"
+smallvec = "1.4.1"
+by_address = "1.0.4"
+femtovg = { git = "https://github.com/femtovg/femtovg", branch = "master" }
+imgref = "1.7.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web_sys = { version = "0.3", package = "web-sys", features=["console", "WebGlContextAttributes"] }
+wasm-bindgen = { version = "0.2" }
+winit = { version = "0.24", default-features = false, features = ["web-sys"] }
+glow = { version = "0.6.1", features = ["web-sys"], default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+winit = { version = "0.24", default-features = false }
+glutin = { version = "0.26", default-features = false }
+glow = { version = "0.6.1", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = { version = "0.24.0" }
+
